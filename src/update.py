@@ -1,50 +1,105 @@
+from dataclasses import dataclass
+
 import sqlite3
 from bs4 import BeautifulSoup
-import requests
+import asyncio
+import httpx
 
 
-def download_page(page_url):
-    print(f"processing {page_url}")
-    response = requests.get(page_url)
-    soup = BeautifulSoup(response.text, "html.parser")
-    table = soup.find(id="catalogtable")
+@dataclass
+class ParsedAudioBook:
+    name: str
+    author: str
+    links: str = ""
 
-    conn = sqlite3.connect("mds.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM books")
-    known_names = [row[0] for row in cursor.fetchall()]
 
-    for row in table.find_all("tr")[1:]:
-        cells = row.find_all("td")
-        if not cells[2].find("a"):
-            continue
-        name = cells[2].find("a").text
-        author = cells[1].find("a").text.replace("\xa0", " ")
-        if not name in known_names:
-            print(f"Adding {author} - {name}")
+class Crawler:
+    URLS_PENDING = [
+        "http://mds-club.ru/cgi-bin/index.cgi?r=84&lang=rus",
+    ]
+    URLS_PROCESSED = []
+    MAX_CONCURRENT_TASKS = 5
 
-            details_response = requests.get(cells[2].find("a")["href"])
-            details_soup = BeautifulSoup(details_response.text, "html.parser")
-            links = "|".join([x["href"] for x in details_soup.find_all("a") if x["href"].endswith(".mp3")])
-            cursor.execute(
+    def __init__(self):
+        self.semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_TASKS)
+        self.client = httpx.AsyncClient()
+
+        self.known_book_names = self.get_known()
+        self.scrapped = []
+
+    @staticmethod
+    def get_known() -> list:
+        with sqlite3.connect("mds.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM books")
+            names = [row[0] for row in cursor.fetchall()]
+        return names
+
+    def write_scrapped_info(self):
+        with sqlite3.connect("mds.db") as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
                 """
                     INSERT INTO books (name, author, links, status)
                     VALUES (?, ?, ?, ?)
                     """,
-                (name, author, links, "pending"),
+                [(x.name, x.author, x.links, "pending") for x in self.scrapped],
             )
             conn.commit()
-    conn.close()
+        print("\n")
+        print(f"Wrote {len(self.scrapped)} new items to database")
+        print("\n")
 
-    active_div = soup.find(id="roller_active")
-    try:
-        next_page_url = active_div.find_next_sibling().find("a")["href"]
-    except Exception:
-        print("Done")
-    else:
-        download_page(next_page_url)
+    async def download_page(self, url: str) -> str:
+        async with self.semaphore:
+            response = await self.client.get(url)
+        return response.text
+
+    async def scrap_book(self, name: str, author: str, url: str) -> None:
+        response = await self.download_page(url)
+        soup = BeautifulSoup(response, "html.parser")
+        links = "|".join([x["href"] for x in soup.find_all("a") if x["href"].endswith(".mp3")])
+        self.scrapped.append(ParsedAudioBook(name=name, author=author, links=links))
+
+    def find_new_books(self, soup: BeautifulSoup) -> list:
+        result = []
+        table = soup.find(id="catalogtable")
+        for row in table.find_all("tr")[1:]:
+            cells = row.find_all("td")
+            if not cells[2].find("a"):
+                continue
+            name = cells[2].find("a").text
+            author = cells[1].find("a").text.replace("\xa0", " ")
+            url = cells[2].find("a")["href"]
+            if not name in self.known_book_names:
+                result.append((name, author, url))
+
+        return result
+
+    async def crawl(self) -> None:
+        if not self.URLS_PENDING:
+            return
+
+        url = self.URLS_PENDING.pop()
+        print(f"Crawling {url}")
+        self.URLS_PROCESSED.append(url)
+
+        html = await self.download_page(url)
+        soup = BeautifulSoup(html, "html.parser")
+        links = [x["href"] for x in soup.find(id="roller").find_all("a") if "href" in x.attrs]
+        self.URLS_PENDING += [x for x in links if x not in self.URLS_PROCESSED + self.URLS_PENDING]
+        self.URLS_PENDING = list(set(self.URLS_PENDING))
+
+        tasks = [self.scrap_book(name, author, detail_url) for name, author, detail_url in self.find_new_books(soup)]
+        tasks += [self.crawl() for _ in range(len(self.URLS_PENDING))]
+        await asyncio.gather(*tasks)
+
+
+async def main():
+    obj = Crawler()
+    await obj.crawl()
+    obj.write_scrapped_info()
 
 
 if __name__ == "__main__":
-    entrypoint = "http://mds-club.ru/cgi-bin/index.cgi?r=84&lang=rus"
-    download_page(entrypoint)
+    asyncio.run(main())
