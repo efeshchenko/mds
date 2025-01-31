@@ -58,7 +58,7 @@ class Crawler:
     async def scrap_book(self, name: str, author: str, url: str) -> None:
         response = await self.download_page(url)
         soup = BeautifulSoup(response, "html.parser")
-        links = "|".join([x["href"] for x in soup.find_all("a") if x["href"].endswith(".mp3")])
+        links = " || ".join([x["href"] for x in soup.find_all("a") if x["href"].endswith(".mp3")])
         self.scrapped.append(ParsedAudioBook(name=name, author=author, links=links))
 
     def find_new_books(self, soup: BeautifulSoup) -> list:
