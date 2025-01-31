@@ -1,9 +1,9 @@
+import asyncio
+import sqlite3
 from dataclasses import dataclass
 
-import sqlite3
-from bs4 import BeautifulSoup
-import asyncio
 import httpx
+from bs4 import BeautifulSoup
 
 
 @dataclass

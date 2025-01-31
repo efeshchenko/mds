@@ -114,5 +114,6 @@ class Downloader:
                         )
                         conn.commit()
 
+
 if __name__ == "__main__":
     Downloader().download_batch()
